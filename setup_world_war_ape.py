@@ -22,7 +22,6 @@ Optional: DISCORD_GUILD_ID = the server ID (only needed if the bot is in
 more than one server).
 """
 
-import copy
 import os
 import sys
 
@@ -282,7 +281,8 @@ def build_overwrites(guild, roles, spec):
 def channel_overwrites(guild, roles, category_ow, opts):
     """Start from the category's permissions and apply a channel's extra rules."""
     everyone = guild.default_role
-    ow = copy.deepcopy(category_ow)
+    # copy only the permission values (never the role objects themselves)
+    ow = {t: PermissionOverwrite.from_pair(*o.pair()) for t, o in category_ow.items()}
 
     if "only" in opts:
         ow = {everyone: PermissionOverwrite(view_channel=False)}
