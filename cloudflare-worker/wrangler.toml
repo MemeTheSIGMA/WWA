@@ -4,8 +4,8 @@ compatibility_date = "2025-01-01"
 
 # Non-secret settings. Fill these in before deploying.
 [vars]
-DISCORD_PUBLIC_KEY = ""   # Developer Portal > General Information > Public Key
-DISCORD_GUILD_ID = ""     # your server ID (Developer Mode > right-click server > Copy Server ID)
+DISCORD_PUBLIC_KEY = "0706d8bb7e5958a8aa8e57b9d07dde9d6f3d5e11b3c404afd4a38e3122958d04"   # Developer Portal > General Information > Public Key
+DISCORD_GUILD_ID = "1573870331548934244"     # your server ID (Developer Mode > right-click server > Copy Server ID)
 
 # Runs every minute to give "Unverified" to people who just joined.
 [triggers]
