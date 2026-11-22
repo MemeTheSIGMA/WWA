@@ -22,17 +22,23 @@ Optional: DISCORD_GUILD_ID = the server ID (only needed if the bot is in
 more than one server).
 """
 
+import copy
 import os
 import sys
 
 import discord
 from discord import PermissionOverwrite, Permissions
 
-SEP = "・"  # the dot used in channel names:  📢・announcements
+from wwa_common import SEP, ch, find_channel, norm, upsert_embed  # noqa: F401
+from wwa_social import (BRONZE, SILVER, GOLD, PLATINUM, SOCIAL_ROLES_TOP_DOWN,
+                        INFO_MARKER, info_embed)
+from wwa_applications import (APPLY_CHANNEL, ApplyView, ReviewButton,
+                              load_pending, post_apply_message)
+from wwa_welcome import send_welcome
 
-
-def ch(emoji: str, name: str) -> str:
-    return f"{emoji}{SEP}{name}"
+# Should people who are still Unverified be able to READ 👋・welcome?
+# (True = yes, so they see the greeting that tells them to verify.)
+WELCOME_VISIBLE_TO_UNVERIFIED = True
 
 
 # --------------------------------------------------------------------------
@@ -78,6 +84,11 @@ ROLES = [
     ("Playtester",        0xA3E635, True,  NONE),
     ("Supporter",         0xF1C40F, True,  NONE),
     ("Content Creator",   0xFF6B9D, True,  NONE),
+    # Social Star tiers (high -> low, so Bronze is the lowest of them)
+    (PLATINUM,            0x7DF9FF, True,  NONE),
+    (GOLD,                0xD4AF37, True,  NONE),
+    (SILVER,              0xC0C0C0, True,  NONE),
+    (BRONZE,              0xCD7F32, True,  NONE),
     ("Verified",          0x95A5A6, False, NONE),
     ("Unverified",        0x546E7A, False, NONE),
     ("Bots",              0x7289DA, True,  NONE),
@@ -100,7 +111,18 @@ INFO_POSTERS = ADMINS  # Owner, Co-Owner, Head Admin, Admin
 #   kind: verify | info | public | restricted
 #   ("t", name) = text channel, ("v", name) = voice channel
 # --------------------------------------------------------------------------
+SOCIAL_VIEWERS = SOCIAL_ROLES_TOP_DOWN + TOP
+
+# A channel can have a 3rd item: a dict of extra rules
+#   "readonly": True      nobody can send (except roles in "post")
+#   "post": [roles]       roles that may still send in a readonly channel
+#   "only": [roles]       ONLY these roles see it
+#   "hide": [roles]       these roles can't see it
+
 CATEGORIES = [
+    {"name": "👋 WELCOME", "kind": "welcome", "top": True, "channels": [
+        ("t", ch("👋", "welcome")),
+    ]},
     {"name": "✅ VERIFY", "kind": "verify", "channels": [
         ("t", ch("✅", "verify")),
     ]},
@@ -152,14 +174,27 @@ CATEGORIES = [
         ("t", ch("📊", "admin-logs")),
         ("v", ch("🔊", "Admin VC")),
     ]},
+    {"name": "📝 APPLICATIONS", "kind": "public", "channels": [
+        ("t", APPLY_CHANNEL, {"readonly": True}),
+        ("t", ch("📥", "application-review"), {"only": ADMINS}),
+    ]},
+    {"name": "🌟 SOCIAL STARS", "kind": "restricted", "roles": SOCIAL_VIEWERS, "channels": [
+        ("t", ch("📜", "social-star-info"), {"readonly": True}),
+        ("t", ch("📢", "promote-your-content")),
+        ("t", ch("💬", "social-star-chat")),
+        ("t", ch("🎬", "clip-sharing")),
+        ("t", ch("🏆", "gold-plus-perks"), {"hide": [BRONZE, SILVER]}),
+    ]},
+    {"name": "💎 PLATINUM LOUNGE", "kind": "restricted", "roles": [PLATINUM] + TOP, "channels": [
+        ("t", ch("💎", "platinum-chat")),
+        ("t", ch("🎥", "early-access-content")),
+        ("t", ch("🤝", "dev-collabs")),
+        ("t", ch("📣", "platinum-announcements"), {"readonly": True, "post": TOP}),
+        ("v", ch("🔊", "Platinum VC")),
+    ]},
 ]
 
 REASON = "World War Ape server setup"
-
-
-def norm(s: str) -> str:
-    """Compare names ignoring case and emoji variation selectors."""
-    return s.replace("️", "").strip().lower()
 
 
 # --------------------------------------------------------------------------
@@ -211,6 +246,23 @@ def build_overwrites(guild, roles, spec):
             create_private_threads=False, send_messages_in_threads=False)
         return ow
 
+    if kind == "welcome":
+        # Everyone reads, nobody writes (the bot has Administrator, so it still can).
+        readonly = PermissionOverwrite(
+            view_channel=True, read_message_history=True, send_messages=False,
+            add_reactions=False, create_public_threads=False,
+            create_private_threads=False, send_messages_in_threads=False)
+        if WELCOME_VISIBLE_TO_UNVERIFIED:
+            ow[everyone] = readonly
+        else:
+            ow[everyone] = PermissionOverwrite(
+                view_channel=False, send_messages=False, add_reactions=False,
+                create_public_threads=False, create_private_threads=False,
+                send_messages_in_threads=False)
+            for name in PUBLIC:
+                ow[roles[name]] = PermissionOverwrite(view_channel=True, read_message_history=True)
+        return ow
+
     for name in spec.get("roles", PUBLIC):
         ow[roles[name]] = PermissionOverwrite(view_channel=True)
 
@@ -227,6 +279,33 @@ def build_overwrites(guild, roles, spec):
     return ow
 
 
+def channel_overwrites(guild, roles, category_ow, opts):
+    """Start from the category's permissions and apply a channel's extra rules."""
+    everyone = guild.default_role
+    ow = copy.deepcopy(category_ow)
+
+    if "only" in opts:
+        ow = {everyone: PermissionOverwrite(view_channel=False)}
+        for name in opts["only"]:
+            ow[roles[name]] = PermissionOverwrite(view_channel=True, send_messages=True)
+
+    for name in opts.get("hide", []):
+        ow.setdefault(roles[name], PermissionOverwrite()).view_channel = False
+
+    if opts.get("readonly"):
+        o = ow.setdefault(everyone, PermissionOverwrite())
+        o.send_messages = False
+        o.add_reactions = False
+        o.create_public_threads = False
+        o.create_private_threads = False
+        o.send_messages_in_threads = False
+        for name in opts.get("post", []):
+            r = ow.setdefault(roles[name], PermissionOverwrite())
+            r.view_channel = True
+            r.send_messages = True
+    return ow
+
+
 # --------------------------------------------------------------------------
 # The bot
 # --------------------------------------------------------------------------
@@ -240,9 +319,13 @@ class SetupBot(discord.Client):
         self.created = []   # things created this run
         self.existing = []  # things that were already there
         self.notes = []     # warnings
+        self.channels = {}  # normalised name -> channel (filled by setup_channels)
 
     async def setup_hook(self):
+        # persistent views: these keep working after restarts
         self.add_view(VerifyView())
+        self.add_view(ApplyView())
+        self.add_dynamic_items(ReviewButton)
 
     # ---- helpers ---------------------------------------------------------
     def pick_guild(self):
@@ -303,20 +386,30 @@ class SetupBot(discord.Client):
             else:
                 cat = await guild.create_category(spec["name"], overwrites=overwrites, reason=REASON)
                 self.created.append(f"category {spec['name']}")
+                if spec.get("top"):
+                    await cat.edit(position=0, reason=REASON)
 
-            for kind, name in spec["channels"]:
+            for item in spec["channels"]:
+                kind, name = item[0], item[1]
+                opts = item[2] if len(item) > 2 else None
+                ch_ow = channel_overwrites(guild, roles, overwrites, opts) if opts else None
                 found = next((c for c in cat.channels if norm(c.name) == norm(name)), None)
                 if found:
                     self.existing.append(f"channel {name}")
                     channel = found
+                    if ch_ow is not None:  # keep special channels matching this script
+                        await channel.edit(overwrites=ch_ow, reason=REASON)
                 else:
+                    extra = {"overwrites": ch_ow} if ch_ow is not None else {}
                     if kind == "t":
-                        channel = await guild.create_text_channel(name, category=cat, reason=REASON)
+                        channel = await guild.create_text_channel(name, category=cat, reason=REASON, **extra)
                     else:
-                        channel = await guild.create_voice_channel(name, category=cat, reason=REASON)
-                    # make sure the new channel uses the category's permissions
-                    await channel.edit(sync_permissions=True, reason=REASON)
+                        channel = await guild.create_voice_channel(name, category=cat, reason=REASON, **extra)
+                    if ch_ow is None:
+                        # make sure the new channel uses the category's permissions
+                        await channel.edit(sync_permissions=True, reason=REASON)
                     self.created.append(f"{'text' if kind == 't' else 'voice'} channel {name}")
+                self.channels[norm(name)] = channel
                 if spec["kind"] == "verify":
                     verify_channel = channel
         return verify_channel
@@ -335,6 +428,18 @@ class SetupBot(discord.Client):
         await channel.send(embed=embed, view=VerifyView())
         self.created.append("verify button message")
 
+    # ---- applications / social stars -------------------------------------
+    async def post_extras(self, guild):
+        apply_ch = self.channels.get(norm(APPLY_CHANNEL))
+        if apply_ch:
+            result = await post_apply_message(apply_ch, self.user.id)
+            (self.created if result == "created" else self.existing).append("application buttons message")
+        info_ch = self.channels.get(norm(ch("📜", "social-star-info")))
+        if info_ch:
+            result = await upsert_embed(info_ch, self.user.id, INFO_MARKER, info_embed())
+            (self.created if result == "created" else self.existing).append("social star info message")
+        await load_pending(guild, self.user.id)
+
     # ---- main ------------------------------------------------------------
     async def on_ready(self):
         if self.did_setup:
@@ -350,6 +455,7 @@ class SetupBot(discord.Client):
             verify_channel = await self.setup_channels(guild, roles)
             if verify_channel:
                 await self.post_verify_message(verify_channel)
+            await self.post_extras(guild)
             # give the Bots role to bots already in the server
             for m in guild.members:
                 if m.bot and roles["Bots"] not in m.roles:
@@ -393,6 +499,11 @@ class SetupBot(discord.Client):
                 await member.add_roles(role, reason="Auto role on join")
             except discord.HTTPException as e:
                 print(f"Couldn't give {role.name} to {member}: {e}")
+        if not member.bot:
+            try:
+                await send_welcome(member)
+            except Exception as e:  # never let the welcome card break joining
+                print(f"Couldn't post welcome card for {member}: {e!r}")
 
 
 def main():
