@@ -105,7 +105,7 @@ async function handleVerify(interaction, env) {
       if (add.status === 403) {
         return reply("I can't give you the role - an admin must move my bot role above Verified/Unverified.");
       }
-      return reply("Something went wrong verifying you. Please try again or tell an admin.");
+      return reply(`Something went wrong verifying you (Discord said ${add.status}). Please try again or tell an admin.`);
     }
     if (unverified && member.roles?.includes(unverified)) {
       await discord(env, "DELETE", `/guilds/${guildId}/members/${uid}/roles/${unverified}`, undefined, "Clicked verify button");
@@ -113,7 +113,7 @@ async function handleVerify(interaction, env) {
     return reply("✅ You're verified! Welcome to World War Ape 🐒");
   } catch (err) {
     console.error("verify failed", err);
-    return reply("Something went wrong verifying you. Please try again or tell an admin.");
+    return reply(`Something went wrong verifying you (${String(err.message || err).slice(0, 80)}). Please try again or tell an admin.`);
   }
 }
 
