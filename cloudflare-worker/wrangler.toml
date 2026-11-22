@@ -1,0 +1,15 @@
+name = "wwa-verify"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Non-secret settings. Fill these in before deploying.
+[vars]
+DISCORD_PUBLIC_KEY = ""   # Developer Portal > General Information > Public Key
+DISCORD_GUILD_ID = ""     # your server ID (Developer Mode > right-click server > Copy Server ID)
+
+# Runs every minute to give "Unverified" to people who just joined.
+[triggers]
+crons = ["* * * * *"]
+
+# The bot token is a SECRET - never put it here. Set it with:
+#   npx wrangler secret put DISCORD_BOT_TOKEN
