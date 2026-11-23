@@ -105,7 +105,7 @@ async function handleVerify(interaction, env) {
       if (add.status === 403) {
         return reply("I can't give you the role - an admin must move my bot role above Verified/Unverified.");
       }
-      return reply("Something went wrong verifying you. Please try again or tell an admin.");
+      return reply(`Something went wrong verifying you (Discord said ${add.status}). Please try again or tell an admin.`);
     }
     if (unverified && member.roles?.includes(unverified)) {
       await discord(env, "DELETE", `/guilds/${guildId}/members/${uid}/roles/${unverified}`, undefined, "Clicked verify button");
@@ -113,7 +113,201 @@ async function handleVerify(interaction, env) {
     return reply("✅ You're verified! Welcome to World War Ape 🐒");
   } catch (err) {
     console.error("verify failed", err);
-    return reply("Something went wrong verifying you. Please try again or tell an admin.");
+    return reply(`Something went wrong verifying you (${String(err.message || err).slice(0, 80)}). Please try again or tell an admin.`);
+  }
+}
+
+
+// ---------- applications (apply buttons -> form -> review channel -> Accept/Deny) ----------
+const REVIEWERS = ["Owner", "Co-Owner", "Head Admin", "Admin"];
+// [short label, full question, long answer?]
+const APPS = {
+  moderator: { label: "Moderator", emoji: "🛡️", role: "Trial Moderator", questions: [
+    ["Timezone & active hours", "What is your timezone and what hours can you be active?", false],
+    ["Past moderation experience", "Describe your past moderation experience.", true],
+    ["Two members fighting in general?", "What would you do if two members start fighting in general?", true],
+    ["A friend breaks the rules?", "How would you handle a friend breaking the rules?", true],
+    ["Why do you want to moderate?", "Why do you want to moderate World War Ape?", true]] },
+  developer: { label: "Developer", emoji: "💻", role: "Developer", questions: [
+    ["Unity and C# experience", "What experience do you have with Unity and C#?", true],
+    ["Multiplayer / Photon / VR experience", "What experience do you have with multiplayer, Photon or VR?", true],
+    ["Link to past work or GitHub", "Link to your past work or GitHub.", false],
+    ["Hours per week", "How many hours per week can you give?", false],
+    ["Why do you want to join?", "Why do you want to join the dev team?", true]] },
+  "3d_modeler": { label: "3D Modeler", emoji: "🧊", role: "3D Modeler", questions: [
+    ["Software you use", "Which 3D software do you use?", false],
+    ["Portfolio link", "Link to your portfolio.", false],
+    ["Low-poly / Quest-friendly models", "Do you have experience with low-poly / Quest-friendly models?", true],
+    ["Hours per week", "How many hours per week can you give?", false],
+    ["Why do you want to join?", "Why do you want to join the team?", true]] },
+  artist: { label: "Artist", emoji: "🎨", role: "Artist", questions: [
+    ["Art style and tools", "What is your art style and which tools do you use?", true],
+    ["Portfolio link", "Link to your portfolio.", false],
+    ["Textures, UI or logos?", "Can you make textures, UI and/or logos? Which ones?", false],
+    ["Hours per week", "How many hours per week can you give?", false],
+    ["Why do you want to join?", "Why do you want to join the team?", true]] },
+  music_sound: { label: "Music/Sound", emoji: "🎵", role: "Music/Sound", questions: [
+    ["Tools you use", "Which tools do you use?", false],
+    ["Link to samples", "Link to your samples.", false],
+    ["Sound effects, music or both?", "Can you make sound effects, music, or both?", false],
+    ["Hours per week", "How many hours per week can you give?", false],
+    ["Why do you want to join?", "Why do you want to join the team?", true]] },
+  playtester: { label: "Playtester", emoji: "🧪", role: "Playtester", questions: [
+    ["VR headset you own", "Which VR headset do you own?", false],
+    ["How often can you test?", "How often can you playtest?", false],
+    ["Bug reporting experience", "Do you have experience reporting bugs? Tell us about it.", true],
+    ["Favorite VR games", "What are your favorite VR games?", true],
+    ["Why do you want to test?", "Why do you want to playtest World War Ape?", true]] },
+  social_star: { label: "Social Star", emoji: "⭐", role: "⭐ Social Star Bronze", questions: [
+    ["Platform(s) and channel links", "Which platform(s) do you create on? Include your channel links.", true],
+    ["Follower count", "What is your follower count (per platform)?", false],
+    ["How often do you post?", "How often do you post?", false],
+    ["Content you'd make", "What content would you make about World War Ape?", true],
+    ["Why do you want to join?", "Why do you want to be a Social Star?", true]] },
+};
+
+const ephemeral = (content) => json({ type: 4, data: { content, flags: EPHEMERAL } });
+const normName = (n) => n.replace(/\uFE0F/g, "").trim().toLowerCase();
+
+async function findChannel(env, guildId, suffix) {
+  const res = await discord(env, "GET", `/guilds/${guildId}/channels`);
+  if (!res.ok) throw new Error(`Couldn't read channels (${res.status})`);
+  return (await res.json()).find((c) => c.type !== 4 && normName(c.name).endsWith(suffix));
+}
+
+async function dm(env, userId, content) {
+  try {
+    const c = await discord(env, "POST", "/users/@me/channels", { recipient_id: userId });
+    if (!c.ok) return false;
+    const m = await discord(env, "POST", `/channels/${(await c.json()).id}/messages`, { content });
+    return m.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Apply button -> open the form
+async function handleApplyClick(interaction, env) {
+  const key = interaction.data.custom_id.split(":")[2];
+  const app = APPS[key];
+  if (!app) return ephemeral("Unknown application type.");
+  try {
+    const roles = await getRoles(env, interaction.guild_id);
+    if (roles[app.role] && interaction.member?.roles?.includes(roles[app.role]))
+      return ephemeral(`You already have the **${app.role}** role.`);
+  } catch (_) { /* fine - just show the form */ }
+  return json({ type: 9, data: {
+    custom_id: `wwa:form:${key}`,
+    title: `${app.label} Application`.slice(0, 45),
+    components: app.questions.map(([label, full, long], i) => ({
+      type: 1, components: [{
+        type: 4, custom_id: `q${i}`, label, placeholder: full.slice(0, 100),
+        style: long ? 2 : 1, required: true, max_length: long ? 1000 : 300,
+      }],
+    })),
+  } });
+}
+
+// Form submitted -> post to the review channel
+async function handleFormSubmit(interaction, env) {
+  const { guild_id: guildId, member, application_id: appId, token } = interaction;
+  const key = interaction.data.custom_id.split(":")[2];
+  const app = APPS[key];
+  const reply = (content) =>
+    fetch(`${API}/webhooks/${appId}/${token}/messages/@original`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ content }),
+    });
+  try {
+    const review = await findChannel(env, guildId, "application-review");
+    if (!review) return reply("The review channel is missing - please tell an admin.");
+    const user = member.user;
+    const answers = {};
+    for (const row of interaction.data.components) for (const c of row.components) answers[c.custom_id] = c.value;
+    const embed = {
+      title: `${app.emoji} ${app.label} Application`,
+      color: 0xf1c40f,
+      timestamp: new Date().toISOString(),
+      author: { name: `${user.username} (${user.id})` },
+      fields: [
+        { name: "Applicant", value: `<@${user.id}>`, inline: false },
+        ...app.questions.map(([, full], i) => ({
+          name: full.slice(0, 256), value: (answers[`q${i}`] || "-").slice(0, 1024), inline: false,
+        })),
+      ],
+      footer: { text: `app:${key}:${user.id}` },
+    };
+    const res = await discord(env, "POST", `/channels/${review.id}/messages`, {
+      embeds: [embed],
+      components: [{ type: 1, components: [
+        { type: 2, style: 3, label: "Accept", emoji: { name: "✅" }, custom_id: `wwa:review:accept:${key}:${user.id}` },
+        { type: 2, style: 4, label: "Deny", emoji: { name: "❌" }, custom_id: `wwa:review:deny:${key}:${user.id}` },
+      ] }],
+    });
+    if (!res.ok) return reply(`Couldn't send your application (Discord said ${res.status}). Please tell an admin.`);
+    return reply(`✅ Your **${app.label}** application was sent! We'll DM you with the result (keep your DMs open).`);
+  } catch (err) {
+    console.error("application failed", err);
+    return reply("Something went wrong sending your application. Please try again or tell an admin.");
+  }
+}
+
+// Accept / Deny pressed in the review channel
+async function handleReview(interaction, env) {
+  const { guild_id: guildId, member, application_id: appId, token, message } = interaction;
+  const [, , action, key, uid] = interaction.data.custom_id.split(":");
+  const app = APPS[key];
+  const accepted = action === "accept";
+  const followup = (content) =>
+    fetch(`${API}/webhooks/${appId}/${token}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content, flags: EPHEMERAL }),
+    });
+  try {
+    if (!app) return followup("Unknown application type.");
+    const roles = await getRoles(env, guildId);
+    const isAdmin = (BigInt(member.permissions || "0") & 8n) !== 0n;
+    const isReviewer = isAdmin || REVIEWERS.some((n) => roles[n] && member.roles?.includes(roles[n]));
+    if (!isReviewer) return followup("Only Owner, Co-Owner and Admins can review applications.");
+
+    const reviewer = member.user.id;
+    const notes = [];
+    let inServer = true;
+    if (accepted) {
+      const roleId = roles[app.role];
+      if (!roleId) return followup(`⚠️ The role **${app.role}** doesn't exist, so I did nothing. Create it and press Accept again.`);
+      const add = await discord(env, "PUT", `/guilds/${guildId}/members/${uid}/roles/${roleId}`, undefined,
+        `${app.label} application accepted`);
+      if (add.status === 404) { inServer = false; notes.push("Applicant has left the server - no role given."); }
+      else if (!add.ok) return followup(`⚠️ I can't give **${app.role}** (Discord said ${add.status}). Drag my bot role above it in Server Settings → Roles, then press Accept again.`);
+    }
+    const text = accepted
+      ? `🎉 Congratulations! Your **${app.label}** application for **World War Ape** was accepted` +
+        (inServer ? ` and you now have the **${app.role}** role.` : ".") + " Welcome to the team! 🐒"
+      : `Hi! Thank you for applying for **${app.label}** in **World War Ape** and for the time you put in. ` +
+        "After reviewing it, we're not able to accept your application right now. Please don't be " +
+        "discouraged - you're welcome to apply again in the future. 💛";
+    if (!(await dm(env, uid, text))) notes.push("Couldn't DM the applicant (their DMs are closed).");
+
+    const embed = { ...(message.embeds?.[0] || {}) };
+    embed.color = accepted ? 0x2ecc71 : 0xe74c3c;
+    embed.fields = [...(embed.fields || []), {
+      name: "Decision",
+      value: `${accepted ? "✅ Accepted" : "❌ Denied"} by <@${reviewer}> • <t:${Math.floor(Date.now() / 1000)}:f>` +
+        notes.map((n) => `\n⚠️ ${n}`).join(""),
+      inline: false,
+    }];
+    await discord(env, "PATCH", `/channels/${message.channel_id}/messages/${message.id}`, { embeds: [embed], components: [] });
+
+    const log = await findChannel(env, guildId, "admin-logs");
+    if (log) {
+      await discord(env, "POST", `/channels/${log.id}/messages`, {
+        content: `${accepted ? "✅" : "❌"} <@${reviewer}> ${accepted ? "accepted" : "denied"} <@${uid}>'s **${app.label}** application.`,
+        allowed_mentions: { parse: [] },
+      });
+    }
+  } catch (err) {
+    console.error("review failed", err);
+    return followup(`Something went wrong (${String(err.message || err).slice(0, 80)}). Please try again.`);
   }
 }
 
@@ -158,6 +352,16 @@ export default {
       // Acknowledge instantly (Discord needs a reply in 3s), do the work after.
       ctx.waitUntil(handleVerify(interaction, env));
       return json({ type: 5, data: { flags: EPHEMERAL } });
+    }
+    const id = interaction.data?.custom_id || "";
+    if (interaction.type === 3 && id.startsWith("wwa:apply:")) return handleApplyClick(interaction, env);
+    if (interaction.type === 5 && id.startsWith("wwa:form:")) {
+      ctx.waitUntil(handleFormSubmit(interaction, env));
+      return json({ type: 5, data: { flags: EPHEMERAL } });
+    }
+    if (interaction.type === 3 && id.startsWith("wwa:review:")) {
+      ctx.waitUntil(handleReview(interaction, env));
+      return json({ type: 6 });
     }
     return json({ type: 4, data: { content: "Unknown action.", flags: EPHEMERAL } });
   },
