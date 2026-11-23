@@ -6,6 +6,7 @@ import worker from "../src/index.js";
 const GUILD = "111", USER = "222", APP = "333";
 const ROLES = [
   { id: "10", name: "Verified" }, { id: "11", name: "Unverified" }, { id: "12", name: "Bots" },
+  { id: "20", name: "Developer" }, { id: "21", name: "Admin" },
 ];
 
 // Fake Discord API
@@ -108,4 +109,67 @@ test("scheduled: only brand-new role-less members get Unverified; bots get Bots"
   await done();
   const puts = calls.filter((c) => c.method === "PUT").map((c) => c.url.split("/members/")[1]);
   assert.deepEqual(puts.sort(), ["1/roles/11", "4/roles/12"]);
+});
+
+test("apply button opens a form with 5 questions", async () => {
+  mockDiscord();
+  const { env, signed } = await setup();
+  const res = await worker.fetch(await signed({
+    type: 3, application_id: APP, token: "t", guild_id: GUILD,
+    data: { custom_id: "wwa:apply:developer" }, member: { user: { id: USER }, roles: [] },
+  }), env, ctxFactory().ctx);
+  const body = await res.json();
+  assert.equal(body.type, 9);
+  assert.equal(body.data.custom_id, "wwa:form:developer");
+  assert.equal(body.data.components.length, 5);
+});
+
+test("form submit posts to review channel; accept gives role", async () => {
+  calls = [];
+  const posts = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url), method = init.method || "GET";
+    posts.push({ method, u, body: init.body });
+    if (u.endsWith(`/guilds/${GUILD}/roles`)) return Response.json(ROLES);
+    if (u.endsWith(`/guilds/${GUILD}/channels`)) return Response.json([{ id: "900", type: 0, name: "📥・application-review" }, { id: "901", type: 0, name: "📊・admin-logs" }]);
+    if (u.endsWith("/users/@me/channels")) return Response.json({ id: "777" });
+    return new Response("{}", { status: 200 });
+  };
+  const { env, signed } = await setup();
+  let c = ctxFactory();
+  let res = await worker.fetch(await signed({
+    type: 5, application_id: APP, token: "t", guild_id: GUILD,
+    data: { custom_id: "wwa:form:developer", components: [0, 1, 2, 3, 4].map((i) => ({ components: [{ custom_id: `q${i}`, value: "a" }] })) },
+    member: { user: { id: USER, username: "bob" }, roles: [] },
+  }), env, c.ctx);
+  assert.deepEqual(await res.json(), { type: 5, data: { flags: 64 } });
+  await c.done();
+  assert.ok(posts.some((p) => p.method === "POST" && p.u.endsWith("/channels/900/messages") && p.body.includes("wwa:review:accept:developer:222")));
+
+  posts.length = 0;
+  c = ctxFactory();
+  res = await worker.fetch(await signed({
+    type: 3, application_id: APP, token: "t", guild_id: GUILD,
+    data: { custom_id: `wwa:review:accept:developer:${USER}` },
+    member: { user: { id: "999" }, roles: ["21"], permissions: "0" },
+    message: { id: "5", channel_id: "900", embeds: [{ title: "x", fields: [] }] },
+  }), env, c.ctx);
+  assert.deepEqual(await res.json(), { type: 6 });
+  await c.done();
+  assert.ok(posts.some((p) => p.method === "PUT" && p.u.endsWith(`/members/${USER}/roles/20`)));
+  assert.ok(posts.some((p) => p.method === "PATCH" && p.u.endsWith("/channels/900/messages/5")));
+});
+
+test("non-reviewer cannot accept", async () => {
+  mockDiscord();
+  const { env, signed } = await setup();
+  const c = ctxFactory();
+  await worker.fetch(await signed({
+    type: 3, application_id: APP, token: "t", guild_id: GUILD,
+    data: { custom_id: `wwa:review:accept:developer:${USER}` },
+    member: { user: { id: "999" }, roles: [], permissions: "0" },
+    message: { id: "5", channel_id: "900", embeds: [{}] },
+  }), env, c.ctx);
+  await c.done();
+  assert.ok(!calls.some((x) => x.method === "PUT"));
 });
